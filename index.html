@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nana's House</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; color:#ddd; font-family:Georgia,serif; overflow:hidden; }
+  #wrap { width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
+  #stage { position:relative; width:min(100vw, calc(100vh * 1.6)); aspect-ratio:8/5; background:#000; }
+  canvas { width:100%; height:100%; display:block; image-rendering:pixelated; }
+  #lives { position:absolute; left:12px; top:10px; font-size:clamp(16px,2.6vw,26px); color:#e33; text-shadow:0 0 6px #000; }
+  #items { position:absolute; right:12px; top:12px; font-size:clamp(12px,1.8vw,17px); color:#ddd; text-shadow:0 0 6px #000; text-align:right; }
+  #msg { position:absolute; left:0; right:0; bottom:12%; text-align:center; font-size:clamp(14px,2.2vw,22px); color:#fff; text-shadow:0 0 8px #000, 0 0 3px #000; pointer-events:none; padding:0 10px; }
+  #prompt { position:absolute; left:0; right:0; top:56%; text-align:center; font-size:clamp(13px,1.9vw,18px); color:#ffd36a; text-shadow:0 0 6px #000; pointer-events:none; }
+  #cross { position:absolute; left:50%; top:50%; width:4px; height:4px; margin:-2px 0 0 -2px; background:rgba(255,255,255,.55); border-radius:50%; pointer-events:none; }
+  #noise { position:absolute; left:12px; bottom:12px; width:120px; font-size:11px; color:#aaa; letter-spacing:1px; }
+  #noiseBar { height:6px; background:#222; border:1px solid #555; margin-top:3px; }
+  #noiseFill { height:100%; width:0; background:#c9a227; }
+  #ov { position:absolute; left:0; top:0; right:0; bottom:0; background:rgba(0,0,0,.84); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px; z-index:10; }
+  #ov h1 { font-size:clamp(26px,5vw,48px); margin:0 0 12px; color:#c33; letter-spacing:3px; }
+  #ov p { max-width:580px; line-height:1.6; color:#ccc; font-size:clamp(13px,1.8vw,16px); margin:0; }
+  #ovB { margin-top:18px; padding:12px 28px; font:inherit; font-size:18px; background:#7a1212; color:#fff; border:1px solid #c33; border-radius:8px; cursor:pointer; }
+  #ovB:hover { background:#951818; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="lives"></div>
+    <div id="items"></div>
+    <div id="prompt"></div>
+    <div id="msg"></div>
+    <div id="cross"></div>
+    <div id="noise">NOISE<div id="noiseBar"><div id="noiseFill"></div></div></div>
+    <div id="ov">
+      <h1 id="ovT">NANA'S HOUSE</h1>
+      <p id="ovP"></p>
+      <button id="ovB">Click to play</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+"use strict";
+
+var W = 480, H = 300, FOV = 0.66, NV = 8;
+var MW = 24, MH = 18;
+
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+canvas.width = W;
+canvas.height = H;
+ctx.imageSmoothingEnabled = false;
+
+var livesEl = document.getElementById("lives");
+var itemsEl = document.getElementById("items");
+var msgEl = document.getElementById("msg");
+var promptEl = document.getElementById("prompt");
+var noiseFill = document.getElementById("noiseFill");
+var ov = document.getElementById("ov");
+var ovT = document.getElementById("ovT");
+var ovP = document.getElementById("ovP");
+var ovB = document.getElementById("ovB");
+
+// ---------- Map ----------
+var map = [];
+
+function carve(x1, y1, x2, y2) {
+  for (var y = y1; y <= y2; y++) for (var x = x1; x <= x2; x++) map[y][x] = 0;
+}
+
+function buildMap() {
+  var x, y;
+  map = [];
+  for (y = 0; y < MH; y++) {
+    map[y] = [];
+    for (x = 0; x < MW; x++) map[y][x] = 1;
+  }
+  carve(1, 1, 6, 5);
+  carve(8, 1, 14, 5);
+  carve(16, 1, 22, 5);
+  carve(1, 7, 22, 9);
+  carve(1, 11, 10, 16);
+  carve(12, 11, 16, 16);
+  carve(18, 11, 22, 16);
+
+  map[6][3] = 0; map[6][11] = 0; map[6][19] = 0;
+  map[10][5] = 0; map[10][14] = 0;
+  map[10][20] = 3;   // locked door (brass key)
+  map[13][23] = 4;   // front door (red key)
+
+  map[3][0] = 5; map[0][11] = 5; map[3][23] = 5; map[13][0] = 5;
+  map[17][14] = 5; map[8][0] = 5; map[8][23] = 5;   // wardrobes
+}
+
+function solid(x, y) {
+  var ix = Math.floor(x), iy = Math.floor(y);
+  if (ix < 0 || iy < 0 || ix >= MW || iy >= MH) return true;
+  return map[iy][ix] !== 0;
+}
+
+// ---------- Textures ----------
+function makeTex(w, h, fn) {
+  var c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  fn(c.getContext("2d"));
+  return c;
+}
+
+function shadeVariants(tex) {
+  var out = [];
+  for (var i = 0; i < NV; i++) {
+    var c = document.createElement("canvas");
+    c.width = tex.width; c.height = tex.height;
+    var g = c.getContext("2d");
+    g.drawImage(tex, 0, 0);
+    g.globalCompositeOperation = "source-atop";
+    g.fillStyle = "rgba(0,0,0," + (i / (NV - 1) * 0.92) + ")";
+    g.fillRect(0, 0, c.width, c.height);
+    out.push(c);
+  }
+  return out;
+}
+
+function drawKey(g, color) {
+  var glow = g.createRadialGradient(16, 16, 2, 16, 16, 16);
+  glow.addColorStop(0, "rgba(255,225,130,0.55)");
+  glow.addColorStop(1, "rgba(255,225,130,0)");
+  g.fillStyle = glow;
+  g.fillRect(0, 0, 32, 32);
+  g.fillStyle = color;
+  g.beginPath(); g.arc(9, 16, 6, 0, Math.PI * 2); g.fill();
+  g.fillStyle = "#000";
+  g.beginPath(); g.arc(9, 16, 2.5, 0, Math.PI * 2); g.fill();
+  g.fillStyle = color;
+  g.fillRect(14, 15, 15, 3);
+  g.fillRect(24, 18, 3, 5);
+  g.fillRect(19, 18, 3, 4);
+}
+
+var grannyTex = shadeVariants(makeTex(64, 128, function (g) {
+  g.fillStyle = "#4a4458";
+  g.beginPath(); g.moveTo(20, 48); g.lineTo(44, 48); g.lineTo(54, 126); g.lineTo(10, 126); g.closePath(); g.fill();
+  g.fillStyle = "#d2c0a8";
+  g.fillRect(12, 52, 6, 34); g.fillRect(46, 52, 6, 34);
+  g.fillStyle = "#4a4458";
+  g.fillRect(14, 48, 8, 22); g.fillRect(42, 48, 8, 22);
+  g.fillStyle = "#d8c7b0";
+  g.beginPath(); g.arc(32, 30, 14, 0, Math.PI * 2); g.fill();
+  g.fillStyle = "#b9b9c0";
+  g.beginPath(); g.arc(32, 24, 15, Math.PI, 0); g.fill();
+  g.fillRect(17, 24, 5, 26); g.fillRect(42, 24, 5, 26);
+  g.beginPath(); g.arc(32, 10, 7, 0, Math.PI * 2); g.fill();
+  g.fillStyle = "#fff";
+  g.fillRect(25, 28, 5, 4); g.fillRect(34, 28, 5, 4);
+  g.fillStyle = "#000";
+  g.fillRect(27, 29, 2, 3); g.fillRect(36, 29, 2, 3);
+  g.fillStyle = "#3a0d0d";
+  g.fillRect(28, 38, 8, 2);
+}));
+
+var brassTex = shadeVariants(makeTex(32, 32, function (g) { drawKey(g, "#d9a62e"); }));
+var redTex = shadeVariants(makeTex(32, 32, function (g) { drawKey(g, "#d93a3a"); }));
+
+// ---------- Audio ----------
+var AC = null;
+
+function audio() {
+  if (!AC) {
+    try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  if (AC && AC.state === "suspended") AC.resume();
+}
+
+function tone(freq, dur, vol, type, slideTo) {
+  if (!AC) return;
+  try {
+    var o = AC.createOscillator(), g = AC.createGain(), now = AC.currentTime;
+    o.type = type || "sine";
+    o.frequency.setValueAtTime(freq, now);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, now + dur);
+    g.gain.setValueAtTime(vol, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    o.connect(g); g.connect(AC.destination);
+    o.start(); o.stop(now + dur);
+  } catch (e) {}
+}
+
+// ---------- Game state ----------
+var START = { x: 2.5, y: 2.5, a: 0.2 };
+var P = { x: 2.5, y: 2.5, a: 0.2 };
+var has = { brass: false, red: false };
+var items = [
+  { x: 13.5, y: 4.5, type: "brass", taken: false },
+  { x: 15.5, y: 15.5, type: "red", taken: false }
+];
+var WAYPOINTS = [
+  { x: 3, y: 3 }, { x: 11, y: 3 }, { x: 19, y: 3 }, { x: 4, y: 8 },
+  { x: 12, y: 8 }, { x: 20, y: 8 }, { x: 5, y: 13 }, { x: 14, y: 13 }
+];
+
+var gameState = "menu";
+var lives = 3, hidden = false, hideCell = null;
+var keys = {};
+var noise = 0, ch = 0.5, t = 0, flick = 1, flash = 0, msgT = 0;
+var centerHit = null;
+var G = null;
+var zbuf = new Float32Array(W);
+var dirX = 1, dirY = 0, plX = 0, plY = FOV;
+
+function msg(text, secs) {
+  msgEl.textContent = text;
+  msgT = secs || 3;
+}
+
+function hud() {
+  var s = "", i;
+  for (i = 0; i < lives; i++) s += "\u2665 ";
+  for (i = lives; i < 3; i++) s += "\u2661 ";
+  livesEl.textContent = s;
+  itemsEl.innerHTML = "Brass key: " + (has.brass ? "\u2713" : "\u2014") +
+                      "<br>Red key: " + (has.red ? "\u2713" : "\u2014");
+}
+
+function showOverlay(title, html, btn) {
+  ovT.textContent = title;
+  ovP.innerHTML = html;
+  ovB.textContent = btn;
+  ov.style.display = "flex";
+}
+
+var INTRO = "You're trapped in Nana's house. Find the <b>brass key</b>, use it to open the locked door, " +
+  "find the <b>red key</b>, and escape through the front door.<br><br>" +
+  "Nana hears everything. Running is loud, crouching is quiet. " +
+  "If she's chasing you, break her line of sight and hide in a wardrobe.<br><br>" +
+  "<b>W A S D</b> move &nbsp;&middot;&nbsp; <b>Mouse</b> or <b>\u2190 \u2192</b> look &nbsp;&middot;&nbsp; " +
+  "<b>Shift</b> run &nbsp;&middot;&nbsp; <b>C</b> crouch &nbsp;&middot;&nbsp; <b>E</b> interact";
+
+// ---------- Pathfinding ----------
+function bfs(sx, sy, tx, ty) {
+  var size = MW * MH;
+  var prev = new Int16Array(size);
+  var i;
+  for (i = 0; i < size; i++) prev[i] = -2;
+  var start = sy * MW + sx, goal = ty * MW + tx;
+  var q = [start], head = 0;
+  prev[start] = -1;
+  var DX = [1, -1, 0, 0], DY = [0, 0, 1, -1];
+
+  while (head < q.length) {
+    var cur = q[head++];
+    if (cur === goal) break;
+    var cx = cur % MW, cy = (cur / MW) | 0;
+    for (i = 0; i < 4; i++) {
+      var nx = cx + DX[i], ny = cy + DY[i];
+      if (nx < 0 || ny < 0 || nx >= MW || ny >= MH) continue;
+      if (map[ny][nx] !== 0) continue;
+      var k = ny * MW + nx;
+      if (prev[k] !== -2) continue;
+      prev[k] = cur;
+      q.push(k);
+    }
+  }
+  if (prev[goal] === -2) return null;
+  var path = [], c = goal;
+  while (c !== start) {
+    path.push({ x: c % MW, y: (c / MW) | 0 });
+    c = prev[c];
+  }
+  path.reverse();
+  return path;
+}
+
+function hasLOS(x0, y0, x1, y1) {
+  var dx = x1 - x0, dy = y1 - y0;
+  var dist = Math.sqrt(dx * dx + dy * dy);
+  var steps = Math.ceil(dist / 0.15);
+  for (var i = 1; i < steps; i++) {
+    if (solid(x0 + dx * i / steps, y0 + dy * i / steps)) return false;
+  }
+  return true;
+}
+
+function angDiff(a, b) {
+  var d = a - b;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+// ---------- Nana ----------
+function resetGranny() {
+  G = {
+    x: 20.5, y: 8.5, face: Math.PI, state: "patrol", path: null, pathKey: "",
+    target: null, wait: 0, stun: 2, lastX: 0, lastY: 0, loseT: 0, repathT: 0,
+    hideT: -1, hideRoll: false, stepT: 0, hbT: 0, searchT: 0
+  };
+}
+
+function pickWaypoint() {
+  for (var tries = 0; tries < 8; tries++) {
+    var wp = WAYPOINTS[Math.floor(Math.random() * WAYPOINTS.length)];
+    var cx = Math.floor(G.x), cy = Math.floor(G.y);
+    if (wp.x === cx && wp.y === cy) continue;
+    if (bfs(cx, cy, wp.x, wp.y)) {
+      G.target = { x: wp.x + 0.5, y: wp.y + 0.5 };
+      G.path = null;
+      return;
+    }
+  }
+  G.target = { x: G.x, y: G.y };
+}
+
+function walk(tx, ty, dt, speed) {
+  var cx = Math.floor(G.x), cy = Math.floor(G.y);
+  var gx = Math.floor(tx), gy = Math.floor(ty);
+  var ddx, ddy, dd;
+
+  if (cx === gx && cy === gy) {
+    ddx = tx - G.x; ddy = ty - G.y;
+    dd = Math.sqrt(ddx * ddx + ddy * ddy);
+    if (dd < 0.15) return true;
+    var st = Math.min(speed * dt, dd);
+    G.x += ddx / dd * st;
+    G.y += ddy / dd * st;
+    G.face = Math.atan2(ddy, ddx);
+    return false;
+  }
+
+  G.repathT -= dt;
+  var key = gx + "," + gy;
+  if (!G.path || G.repathT <= 0 || G.pathKey !== key) {
+    G.path = bfs(cx, cy, gx, gy);
+    G.repathT = 0.4;
+    G.pathKey = key;
+  }
+  if (!G.path || !G.path.length) return true;
+
+  var n = G.path[0], nx = n.x + 0.5, ny = n.y + 0.5;
+  ddx = nx - G.x; ddy = ny - G.y;
+  dd = Math.sqrt(ddx * ddx + ddy * ddy);
+  var step = speed * dt;
+  if (dd <= step) {
+    G.x = nx; G.y = ny;
+    G.path.shift();
+  } else {
+    G.x += ddx / dd * step;
+    G.y += ddy / dd * step;
+  }
+  G.face = Math.atan2(ddy, ddx);
+  return false;
+}
+
+function updateGranny(dt) {
+  if (G.stun > 0) { G.stun -= dt; return; }
+
+  var dx = P.x - G.x, dy = P.y - G.y;
+  var d = Math.sqrt(dx * dx + dy * dy);
+  var los = hasLOS(G.x, G.y, P.x, P.y);
+  var toP = Math.atan2(dy, dx);
+  var inView = Math.abs(angDiff(G.face, toP)) < 1.1;
+  var sees = !hidden && los && d < 9 && (inView || d < 2.2);
+  var heard = !hidden && d < noise * (los ? 1 : 0.55);
+
+  if (sees) {
+    if (G.state !== "chase") {
+      G.state = "chase";
+      G.path = null;
+      tone(300, 0.35, 0.25, "sawtooth", 700);
+    }
+    G.lastX = P.x; G.lastY = P.y; G.loseT = 0;
+  } else if (G.state === "chase") {
+    G.loseT += dt;
+    if (G.loseT > 3) { G.state = "search"; G.searchT = 3.5; G.path = null; }
+  } else if (heard && (G.state === "patrol" || G.state === "investigate")) {
+    G.state = "investigate";
+    G.lastX = P.x; G.lastY = P.y;
+    G.wait = 0; G.path = null;
+  }
+
+  var arrived;
+  if (G.state === "chase") {
+    walk(G.lastX, G.lastY, dt, 3.0);
+  } else if (G.state === "investigate") {
+    arrived = walk(G.lastX, G.lastY, dt, 1.9);
+    if (arrived) {
+      G.wait += dt;
+      G.face += dt * 1.2;
+      if (G.wait > 2.5) { G.state = "patrol"; G.wait = 0; G.target = null; G.path = null; }
+    }
+  } else if (G.state === "search") {
+    arrived = walk(G.lastX, G.lastY, dt, 1.9);
+    if (arrived) {
+      G.searchT -= dt;
+      G.face += dt * 1.2;
+      if (G.searchT <= 0) { G.state = "patrol"; G.target = null; G.path = null; }
+    }
+  } else {
+    if (!G.target) pickWaypoint();
+    arrived = walk(G.target.x, G.target.y, dt, 1.3);
+    if (arrived) {
+      G.wait += dt;
+      G.face += dt * 1.2;
+      if (G.wait > 1.5) { G.wait = 0; pickWaypoint(); }
+    }
+  }
+
+  // Catching the player
+  var dx2 = P.x - G.x, dy2 = P.y - G.y;
+  var d2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+
+  if (!hidden && d2 < 0.8) { caught(); return; }
+
+  if (hidden && d2 < 1.5) {
+    if (G.hideT < 0) {
+      G.hideT = 2.2;
+      G.hideRoll = Math.random() < 0.4;
+    } else if (G.hideT > 0) {
+      G.hideT -= dt;
+      if (G.hideT <= 0 && G.hideRoll) { caught(); return; }
+    }
+  } else if (!hidden || d2 > 2.5) {
+    G.hideT = -1;
+  }
+
+  // Sounds
+  if (d < 12) {
+    G.stepT -= dt;
+    if (G.stepT <= 0) {
+      G.stepT = (G.state === "chase") ? 0.28 : 0.55;
+      tone(60 + Math.random() * 12, 0.08, 0.28 * (1 - d / 12), "sine");
+    }
+  }
+  if (G.state === "chase") {
+    G.hbT -= dt;
+    if (G.hbT <= 0) {
+      G.hbT = 0.6;
+      tone(55, 0.12, 0.35, "sine");
+      setTimeout(function () { tone(50, 0.12, 0.3, "sine"); }, 160);
+    }
+  }
+}
+
+function placeGrannyFar() {
+  var best = WAYPOINTS[0], bd = -1;
+  for (var i = 0; i < WAYPOINTS.length; i++) {
+    var wp = WAYPOINTS[i];
+    var d = (wp.x + 0.5 - START.x) * (wp.x + 0.5 - START.x) + (wp.y + 0.5 - START.y) * (wp.y + 0.5 - START.y);
+    if (d > bd) { bd = d; best = wp; }
+  }
+  G.x = best.x + 0.5; G.y = best.y + 0.5;
+  G.state = "patrol"; G.path = null; G.target = null;
+  G.stun = 3; G.hideT = -1; G.loseT = 0; G.wait = 0;
+}
+
+function caught() {
+  if (G.stun > 0 || gameState !== "play") return;
+  lives--;
+  flash = 1;
+  hidden = false;
+  hud();
+  tone(110, 0.7, 0.5, "sawtooth", 35);
+  tone(1200, 0.25, 0.25, "square", 150);
+  if (lives <= 0) { endGame(false); return; }
+  P.x = START.x; P.y = START.y; P.a = START.a;
+  placeGrannyFar();
+  msg("She caught you! " + lives + (lives === 1 ? " life" : " lives") + " left.", 4);
+}
+
+function endGame(win) {
+  gameState = win ? "won" : "over";
+  keys = {};
+  try { document.exitPointerLock(); } catch (e) {}
+  if (win) {
+    tone(660, 0.25, 0.2, "triangle", 1320);
+    showOverlay("YOU ESCAPED!", "You got out of Nana's house with " + lives + (lives === 1 ? " life" : " lives") + " left.", "Play again");
+  } else {
+    showOverlay("CAUGHT", "Nana got you for the last time.", "Try again");
+  }
+}
+
+// ---------- Player ----------
+function blocked(x, y) {
+  var r = 0.22;
+  return solid(x - r, y - r) || solid(x + r, y - r) || solid(x - r, y + r) || solid(x + r, y + r);
+}
+
+function tryMove(dx, dy) {
+  if (!blocked(P.x + dx, P.y)) P.x += dx;
+  if (!blocked(P.x, P.y + dy)) P.y += dy;
+}
+
+function interact() {
+  if (hidden) { hidden = false; msg("", 0.1); return; }
+  var h = centerHit;
+  if (!h || h.dist > 1.6) return;
+
+  if (h.type === 5) {
+    var seen = G.state === "chase" && hasLOS(G.x, G.y, P.x, P.y) &&
+      Math.sqrt((G.x - P.x) * (G.x - P.x) + (G.y - P.y) * (G.y - P.y)) < 9;
+    if (seen) { msg("She's watching you. Too late to hide!", 2.5); return; }
+    hidden = true;
+    hideCell = h;
+    P.a = Math.atan2(P.y - (h.my + 0.5), P.x - (h.mx + 0.5));
+    msg("Hiding. Stay quiet... press E to come out.", 3);
+  } else if (h.type === 3) {
+    if (has.brass) {
+      map[h.my][h.mx] = 0;
+      tone(220, 0.25, 0.25, "square", 160);
+      msg("Unlocked the door.", 2.5);
+    } else {
+      msg("Locked. You need the brass key.", 2.5);
+    }
+  } else if (h.type === 4) {
+    if (has.red) endGame(true);
+    else msg("The front door is locked. Find the red key.", 3);
+  }
+}
+
+// ---------- Update ----------
+function update(dt) {
+  t += dt;
+
+  if (!hidden) {
+    if (keys.ArrowLeft) P.a -= 2.2 * dt;
+    if (keys.ArrowRight) P.a += 2.2 * dt;
+  }
+
+  var running = !!(keys.ShiftLeft || keys.ShiftRight);
+  var crouch = !!keys.KeyC;
+  var targetCh = (crouch && !hidden) ? 0.32 : 0.5;
+  ch += (targetCh - ch) * Math.min(1, dt * 8);
+
+  if (hidden) {
+    noise = 0;
+  } else {
+    var mv = 0, st = 0;
+    if (keys.KeyW) mv += 1;
+    if (keys.KeyS) mv -= 1;
+    if (keys.KeyD) st += 1;
+    if (keys.KeyA) st -= 1;
+    if (mv || st) {
+      var len = Math.sqrt(mv * mv + st * st);
+      var sp = crouch ? 1.1 : (running ? 3.6 : 2.2);
+      var dx = Math.cos(P.a), dy = Math.sin(P.a);
+      var vx = (dx * mv - dy * st) / len * sp;
+      var vy = (dy * mv + dx * st) / len * sp;
+      tryMove(vx * dt, vy * dt);
+      noise = crouch ? 1.5 : (running ? 8 : 4);
+    } else {
+      noise = 0.8;
+    }
+  }
+
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    if (it.taken) continue;
+    var ix = it.x - P.x, iy = it.y - P.y;
+    if (ix * ix + iy * iy < 0.5) {
+      it.taken = true;
+      has[it.type] = true;
+      tone(880, 0.18, 0.18, "triangle", 1320);
+      msg("You found the " + it.type + " key.", 3);
+      hud();
+    }
+  }
+
+  updateGranny(dt);
+
+  if (msgT > 0) {
+    msgT -= dt;
+    if (msgT <= 0) msgEl.textContent = "";
+  }
+  if (flash > 0) flash = Math.max(0, flash - dt * 1.2);
+  noiseFill.style.width = Math.min(100, noise / 8 * 100) + "%";
+
+  var txt = "";
+  if (hidden) {
+    txt = "E - Come out";
+  } else if (centerHit && centerHit.dist < 1.6) {
+    if (centerHit.type === 5) txt = "E - Hide";
+    else if (centerHit.type === 3) txt = has.brass ? "E - Unlock door" : "E - Door (locked)";
+    else if (centerHit.type === 4) txt = has.red ? "E - Escape!" : "E - Front door (locked)";
+  }
+  if (txt !== promptEl.textContent) promptEl.textContent = txt;
+}
+
+// ---------- Rendering ----------
+var ceilG = ctx.createLinearGradient(0, 0, 0, H / 2);
+ceilG.addColorStop(0, "#0e0b12");
+ceilG.addColorStop(1, "#000");
+var floorG = ctx.createLinearGradient(0, H / 2, 0, H);
+floorG.addColorStop(0, "#000");
+floorG.addColorStop(1, "#2b1d12");
+var vig = ctx.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.85);
+vig.addColorStop(0, "rgba(0,0,0,0)");
+vig.addColorStop(1, "rgba(0,0,0,0.85)");
+
+var COL = { 1: [128, 104, 86], 3: [112, 70, 40], 4: [44, 96, 66], 5: [84, 54, 30] };
+
+function rgb(r, g, b) {
+  return "rgb(" + (r | 0) + "," + (g | 0) + "," + (b | 0) + ")";
+}
+
+function lightAt(d) {
+  var v = 1.15 - d / 7.5;
+  if (v < 0.05) v = 0.05;
+  if (v > 1) v = 1;
+  return v * flick;
+}
+
+function drawSprite(s) {
+  var sx = s.x - P.x, sy = s.y - P.y;
+  var inv = 1 / (plX * dirY - dirX * plY);
+  var tx = inv * (dirY * sx - dirX * sy);
+  var ty = inv * (-plY * sx + plX * sy);
+  if (ty < 0.15) return;
+
+  var screenX = Math.floor(W / 2 * (1 + tx / ty));
+  var fullH = H / ty;
+  var h = Math.floor(fullH * s.scale);
+  var w = Math.floor(h * s.aspect);
+  if (h < 1 || w < 1) return;
+  var bottom = Math.floor(H / 2 + fullH * ch);
+  var top = bottom - h;
+  var x0 = screenX - (w >> 1), x1 = x0 + w;
+
+  var lvl = Math.floor((1 - Math.min(1, lightAt(ty))) * (NV - 1));
+  if (lvl < 0) lvl = 0;
+  if (lvl > NV - 1) lvl = NV - 1;
+  var tex = s.tex[lvl];
+
+  for (var x = Math.max(0, x0); x < Math.min(W, x1); x++) {
+    if (ty >= zbuf[x]) continue;
+    var tcol = Math.floor((x - x0) * tex.width / w);
+    ctx.drawImage(tex, tcol, 0, 1, tex.height, x, top, 1, h);
+  }
+}
+
+function render() {
+  flick = 0.95 + 0.05 * Math.sin(t * 23);
+  if (Math.random() < 0.015) flick -= 0.3;
+
+  ctx.fillStyle = ceilG;
+  ctx.fillRect(0, 0, W, H / 2);
+  ctx.fillStyle = floorG;
+  ctx.fillRect(0, H / 2, W, H / 2);
+
+  dirX = Math.cos(P.a); dirY = Math.sin(P.a);
+  plX = -dirY * FOV; plY = dirX * FOV;
+  centerHit = null;
+
+  for (var x = 0; x < W; x++) {
+    var cam = 2 * x / W - 1;
+    var rdx = dirX + plX * cam, rdy = dirY + plY * cam;
+    var mx = Math.floor(P.x), my = Math.floor(P.y);
+    var ddx = rdx === 0 ? 1e30 : Math.abs(1 / rdx);
+    var ddy = rdy === 0 ? 1e30 : Math.abs(1 / rdy);
+    var stepX, stepY, sdx, sdy;
+    if (rdx < 0) { stepX = -1; sdx = (P.x - mx) * ddx; } else { stepX = 1; sdx = (mx + 1 - P.x) * ddx; }
+    if (rdy < 0) { stepY = -1; sdy = (P.y - my) * ddy; } else { stepY = 1; sdy = (my + 1 - P.y) * ddy; }
+
+    var side = 0, type = 0, guard = 0;
+    while (guard++ < 64) {
+      if (sdx < sdy) { sdx += ddx; mx += stepX; side = 0; }
+      else { sdy += ddy; my += stepY; side = 1; }
+      if (mx < 0 || my < 0 || mx >= MW || my >= MH) { type = 1; break; }
+      type = map[my][mx];
+      if (type > 0) break;
+    }
+    if (type === 0) type = 1;
+
+    var perp = side === 0 ? sdx - ddx : sdy - ddy;
+    if (perp < 0.05) perp = 0.05;
+    zbuf[x] = perp;
+
+    if (x === (W >> 1)) centerHit = { type: type, dist: perp, mx: mx, my: my };
+
+    var wx = side === 0 ? P.y + perp * rdy : P.x + perp * rdx;
+    wx -= Math.floor(wx);
+
+    var lineH = H / perp;
+    var top = Math.floor(H / 2 - lineH * (1 - ch));
+    var bot = Math.ceil(H / 2 + lineH * ch);
+    var hgt = bot - top;
+    var sh = lightAt(perp) * (side ? 0.78 : 1);
+
+    var base = COL[type];
+    var r = base[0], g = base[1], b = base[2];
+    if (type === 1) {
+      var s2 = (Math.floor(wx * 8) & 1) ? 0.93 : 1;
+      r *= s2; g *= s2; b *= s2;
+    }
+    ctx.fillStyle = rgb(r * sh, g * sh, b * sh);
+    ctx.fillRect(x, top, 1, hgt);
+
+    if (type === 1) {
+      var wb = Math.floor(top + hgt * 0.64);
+      ctx.fillStyle = rgb(60 * sh, 40 * sh, 30 * sh);
+      ctx.fillRect(x, wb, 1, bot - wb);
+      ctx.fillStyle = rgb(150 * sh, 120 * sh, 90 * sh);
+      ctx.fillRect(x, wb - 1, 1, 2);
+    } else if (type === 5) {
+      if (Math.abs(wx - 0.5) < 0.012 || wx < 0.06 || wx > 0.94) {
+        ctx.fillStyle = rgb(28 * sh, 17 * sh, 9 * sh);
+        ctx.fillRect(x, top, 1, hgt);
+      }
+      if (Math.abs(wx - 0.42) < 0.025 || Math.abs(wx - 0.58) < 0.025) {
+        ctx.fillStyle = rgb(210 * sh, 170 * sh, 60 * sh);
+        ctx.fillRect(x, Math.floor(top + hgt * 0.46), 1, Math.ceil(hgt * 0.08));
+      }
+    } else {
+      var plank = wx * 4;
+      if (Math.abs(plank - Math.round(plank)) < 0.04) {
+        ctx.fillStyle = rgb(20 * sh, 12 * sh, 6 * sh);
+        ctx.fillRect(x, top, 1, hgt);
+      }
+      if (Math.abs(wx - 0.8) < 0.05) {
+        ctx.fillStyle = rgb(220 * sh, 180 * sh, 60 * sh);
+        ctx.fillRect(x, Math.floor(top + hgt * 0.46), 1, Math.ceil(hgt * 0.1));
+      }
+    }
+  }
+
+  // Sprites: Nana and the keys
+  var sprites = [{ x: G.x, y: G.y, tex: grannyTex, scale: 0.92, aspect: 0.5 }];
+  items.forEach(function (it) {
+    if (!it.taken) {
+      sprites.push({ x: it.x, y: it.y, tex: it.type === "brass" ? brassTex : redTex, scale: 0.3, aspect: 1 });
+    }
+  });
+  sprites.forEach(function (s) {
+    var sx = s.x - P.x, sy = s.y - P.y;
+    s.d = sx * sx + sy * sy;
+  });
+  sprites.sort(function (a, b) { return b.d - a.d; });
+  sprites.forEach(drawSprite);
+
+  // Hiding in a wardrobe: only two thin slits to look through
+  if (hidden) {
+    ctx.fillStyle = "#060403";
+    ctx.fillRect(0, 0, W * 0.43, H);
+    ctx.fillRect(W * 0.47, 0, W * 0.06, H);
+    ctx.fillRect(W * 0.57, 0, W * 0.43, H);
+  }
+
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, W, H);
+
+  if (flash > 0) {
+    ctx.fillStyle = "rgba(180,0,0," + (flash * 0.6) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// ---------- Setup and input ----------
+function resetGame() {
+  buildMap();
+  items.forEach(function (it) { it.taken = false; });
+  has.brass = false;
+  has.red = false;
+  lives = 3;
+  hidden = false;
+  hideCell = null;
+  flash = 0;
+  P.x = START.x; P.y = START.y; P.a = START.a;
+  resetGranny();
+  msg("Find the brass key.", 4);
+  hud();
+}
+
+ovB.addEventListener("click", function () {
+  audio();
+  if (gameState !== "paused") resetGame();
+  gameState = "play";
+  ov.style.display = "none";
+  try { canvas.requestPointerLock(); } catch (e) {}
+});
+
+document.addEventListener("pointerlockchange", function () {
+  if (document.pointerLockElement !== canvas && gameState === "play") {
+    gameState = "paused";
+    keys = {};
+    showOverlay("PAUSED", "Click to continue.", "Resume");
+  }
+});
+
+document.addEventListener("mousemove", function (e) {
+  if (document.pointerLockElement === canvas && gameState === "play" && !hidden) {
+    P.a += e.movementX * 0.0024;
+  }
+});
+
+document.addEventListener("keydown", function (e) {
+  keys[e.code] = true;
+  if (e.code.indexOf("Arrow") === 0 || e.code === "Space") e.preventDefault();
+  if (e.code === "KeyE" && !e.repeat && gameState === "play") interact();
+});
+
+document.addEventListener("keyup", function (e) { keys[e.code] = false; });
+window.addEventListener("blur", function () { keys = {}; });
+
+buildMap();
+resetGranny();
+hud();
+showOverlay("NANA'S HOUSE", INTRO, "Click to play");
+
+var last = performance.now();
+function frame(now) {
+  var dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (gameState === "play") update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
